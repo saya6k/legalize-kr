@@ -1,0 +1,69 @@
+name: Sync fork with upstream
+
+# Mirrors this fork's `main` onto upstream's `main`.
+#
+# Upstream (legalize-kr/legalize-kr) is a DATA repository: when its parsing /
+# normalization rules improve it rebuilds the whole repo and force-pushes, so
+# commit hashes are NOT stable and the fork's history regularly becomes
+# unrelated to upstream. A normal fast-forward / merge sync therefore breaks.
+# Instead we hard-reset main to upstream/main and re-apply our fork-local
+# files (this workflow, AGENTS.md + CLAUDE.md symlink, .agents/ + .claude
+# symlink) on top, then force-push.
+#
+# Only THIS fork is ever written to. Upstream is fetched (read) only — never
+# pushed to, never sent a PR or any other request.
+
+on:
+  schedule:
+    - cron: '30 18 * * 0'   # weekly on Sunday at 18:30 UTC (Mon 03:30 KST)
+  workflow_dispatch:        # manual run from the Actions tab
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Mirror main onto upstream (force)
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/legalize-kr/legalize-kr.git
+          git fetch --prune upstream main
+
+          # Our main is always "[upstream/main] + 1 overlay commit", so HEAD^
+          # is the upstream commit we last mirrored. If it still matches, the
+          # upstream snapshot is unchanged and there is nothing to do.
+          base=$(git rev-parse 'HEAD^' 2>/dev/null || echo none)
+          upstream=$(git rev-parse upstream/main)
+          if [ "$base" = "$upstream" ]; then
+            echo "Already mirrored to $upstream — nothing to do."
+            exit 0
+          fi
+
+          # Stash fork-local files so they survive the hard reset to upstream.
+          overlay="$RUNNER_TEMP/overlay"
+          rm -rf "$overlay"; mkdir -p "$overlay"
+          for p in .github/workflows/sync-upstream.yml AGENTS.md CLAUDE.md .agents .claude; do
+            if [ -e "$p" ] || [ -L "$p" ]; then
+              mkdir -p "$overlay/$(dirname "$p")"
+              cp -a "$p" "$overlay/$p"
+            fi
+          done
+
+          git reset --hard upstream/main
+          cp -a "$overlay/." .
+          git add --all .github/workflows/sync-upstream.yml AGENTS.md CLAUDE.md .agents .claude
+          git commit -m "ci: re-apply fork-local tooling on upstream mirror"
+          git push --force origin main
+          echo "Mirrored fork main onto upstream $upstream."
